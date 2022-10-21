@@ -3,6 +3,7 @@ use bevy::prelude::*;
 const SNAKE_COLOR: Color = Color::CRIMSON;
 const FOOD_COLOR: Color = Color::ALICE_BLUE;
 
+// TODO: refactor to grid number, pixel calculation should be done separately
 const MAP_WIDTH: u32 = 50;
 const MAP_HEIGHT: u32 = 50;
 const RESOLUTION: (f32, f32) = (500., 500.);
@@ -93,6 +94,7 @@ fn logic_snake_movement(
     mut head_position: Query<(&mut Position, With<Snake>)>,
 ) {
     let grid_per_movement: i32 = 1;
+    // TODO: refactor this mess
     for mut pos in head_position.iter_mut() {
         if kb_input.pressed(KeyCode::A) {
             if pos.0.x > 0 {
