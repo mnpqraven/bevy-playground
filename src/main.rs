@@ -3,7 +3,8 @@ use bevy::time::FixedTimestep;
 use rand::random;
 
 const SNAKE_COLOR: Color = Color::CRIMSON;
-const FOOD_COLOR: Color = Color::ALICE_BLUE;
+const TAIL_COLOR: Color = Color::PINK;
+const FOOD_COLOR: Color = Color::GREEN;
 
 // TODO: refactor to grid number, pixel calculation should be done separately
 const MAP_WIDTH: i32 = 50;
@@ -24,17 +25,17 @@ fn main() {
             ..default()
         })
         .insert_resource(ClearColor(Color::rgb(0.04, 0.04, 0.04)))
+        .insert_resource(SnakeTailVec::default())
         .add_plugins(DefaultPlugins)
         .add_startup_system(startup_system)
         .add_startup_system(startup_camera)
         .add_startup_system(spawn_snake)
-        .add_system(snake_movement_input
-            .before(logic_snake_movement))
+        .add_system(snake_movement_input.before(logic_snake_movement))
         .add_system_set(
             SystemSet::new()
-            .with_run_criteria(FixedTimestep::step(0.15))
-            .with_system(logic_snake_movement)
-            .with_system(logic_hitting_wall_tail)
+                .with_run_criteria(FixedTimestep::step(0.15))
+                .with_system(logic_snake_movement)
+                .with_system(logic_hitting_wall_tail),
         )
         .add_system_set_to_stage(
             CoreStage::PostUpdate,
@@ -50,11 +51,9 @@ fn main() {
         .run();
 }
 
-// E ==========================================================================
-struct Entity(f32);
+// ENTITY =====================================================================
 
-// resource
-struct Target(Entity);
+/// RESOURCE
 /// movement direction
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Direction {
@@ -69,12 +68,14 @@ impl Direction {
             Direction::Left => Self::Right,
             Direction::Right => Self::Left,
             Direction::Up => Self::Down,
-            Direction::Down => Self::Up
+            Direction::Down => Self::Up,
         }
     }
 }
+#[derive(Default, Deref, DerefMut)]
+struct SnakeTailVec(Vec<Entity>);
 
-// C ==========================================================================
+// COMPONENT ==================================================================
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 struct Position {
     x: i32,
@@ -96,15 +97,17 @@ impl Size {
 /// The snake
 #[derive(Component)]
 struct Snake {
-    direction: Direction
+    direction: Direction,
 }
+#[derive(Component)]
+struct SnakeTail;
 /// food Component
 /// spawns periodically, on random Position
 /// despawns when Snake lands on the Position
 #[derive(Component)]
 struct Food;
 
-// S ==========================================================================
+// SYSTEM =====================================================================
 fn startup_system(mut commands: Commands) {
     // command needs to be mut
     let center = Position { x: 0, y: 0 };
@@ -114,7 +117,7 @@ fn startup_camera(mut commands: Commands) {
     commands.spawn_bundle(Camera2dBundle::default());
 }
 
-fn spawn_snake(mut commands: Commands) {
+fn spawn_snake(mut commands: Commands, mut tails: ResMut<SnakeTailVec>) {
     let sprite_snake = SpriteBundle {
         sprite: Sprite {
             color: SNAKE_COLOR,
@@ -126,14 +129,27 @@ fn spawn_snake(mut commands: Commands) {
         },
         ..default()
     };
-    commands
-        .spawn_bundle(sprite_snake)
-        .insert(Snake { direction: Direction::Right })
-        .insert(Position {
-            x: MAP_WIDTH as i32 / 2,
-            y: MAP_HEIGHT as i32 / 2
-        })
-        .insert(Size::square_scale(NODE_ENTITY_SCALE));
+    *tails = SnakeTailVec(vec![
+        commands
+            .spawn_bundle(sprite_snake)
+            .insert(Snake {
+                direction: Direction::Right,
+            })
+            .insert(SnakeTail)
+            .insert(Position {
+                x: MAP_WIDTH as i32 / 2,
+                y: MAP_HEIGHT as i32 / 2,
+            })
+            .insert(Size::square_scale(NODE_ENTITY_SCALE))
+            .id(),
+        spawn_tail(
+            commands,
+            Position {
+                x: (MAP_WIDTH as i32 / 2) - 1,
+                y: MAP_HEIGHT as i32 / 2,
+            },
+        ),
+    ]);
 }
 fn spawn_food(mut commands: Commands) {
     commands
@@ -152,14 +168,24 @@ fn spawn_food(mut commands: Commands) {
         }) // assigning Position
         .insert(Size::square_scale(NODE_ENTITY_SCALE));
 }
+fn spawn_tail(mut commands: Commands, position: Position) -> Entity {
+    commands
+        .spawn_bundle(SpriteBundle {
+            sprite: Sprite {
+                color: TAIL_COLOR,
+                ..default()
+            },
+            ..default()
+        })
+        .insert(SnakeTail)
+        .insert(position)
+        .insert(Size::square_scale(0.6))
+        .id()
+}
 // TODO: refactor this mess
-fn snake_movement_input(
-    kb_input: Res<Input<KeyCode>>,
-    mut head_position: Query<&mut Snake>,
-) {
+fn snake_movement_input(kb_input: Res<Input<KeyCode>>, mut head_position: Query<&mut Snake>) {
     if let Some(mut head) = head_position.iter_mut().next() {
-        let dir: Direction =
-        if kb_input.pressed(KeyCode::A) {
+        let dir: Direction = if kb_input.pressed(KeyCode::A) {
             Direction::Left
         } else if kb_input.pressed(KeyCode::S) {
             Direction::Right
@@ -176,6 +202,7 @@ fn snake_movement_input(
         }
     }
 }
+// TODO: tails following head
 fn logic_snake_movement(mut heads: Query<(&mut Position, &Snake)>) {
     if let Some((mut head_pos, snake)) = heads.iter_mut().next() {
         // keep going in previous facing direction
@@ -183,7 +210,7 @@ fn logic_snake_movement(mut heads: Query<(&mut Position, &Snake)>) {
             Direction::Left => head_pos.x -= MOVE_SPEED,
             Direction::Right => head_pos.x += MOVE_SPEED,
             Direction::Up => head_pos.y += MOVE_SPEED,
-            Direction::Down => head_pos.y -= MOVE_SPEED
+            Direction::Down => head_pos.y -= MOVE_SPEED,
         }
     }
 }
@@ -201,11 +228,7 @@ fn logic_hitting_wall_tail(mut heads: Query<(&mut Position, &Snake)>) {
     }
 }
 /// snake consuming a food entity
-/// TODO:
-fn logic_consume(mut commands: Commands, mut snake: Query<&mut Position, &Snake>) {
-    if  {
-    }
-}
+fn logic_consume(mut commands: Commands, mut snake: Query<&mut Position, &Snake>) {}
 // scales everything up/down to viewport
 fn math_size_scale(window: Res<Windows>, mut q: Query<(&Size, &mut Transform)>) {
     let window = window.get_primary().expect("can't get primary window");
