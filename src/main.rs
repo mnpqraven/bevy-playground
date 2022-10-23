@@ -48,6 +48,8 @@ fn main() {
                 .with_run_criteria(FixedTimestep::step(1.))
                 .with_system(spawn_food),
         )
+        .add_system(logic_consume.after(logic_snake_movement))
+        .add_event::<GrowthEvent>()
         .run();
 }
 
@@ -74,6 +76,7 @@ impl Direction {
 }
 #[derive(Default, Deref, DerefMut)]
 struct SnakeTailVec(Vec<Entity>);
+struct GrowthEvent;
 
 // COMPONENT ==================================================================
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
@@ -182,19 +185,14 @@ fn spawn_tail(mut commands: Commands, position: Position) -> Entity {
         .insert(Size::square_scale(0.6))
         .id()
 }
-// TODO: refactor this mess
 fn snake_movement_input(kb_input: Res<Input<KeyCode>>, mut head_position: Query<&mut Snake>) {
     if let Some(mut head) = head_position.iter_mut().next() {
-        let dir: Direction = if kb_input.pressed(KeyCode::A) {
-            Direction::Left
-        } else if kb_input.pressed(KeyCode::S) {
-            Direction::Right
-        } else if kb_input.pressed(KeyCode::R) {
-            Direction::Down
-        } else if kb_input.pressed(KeyCode::W) {
-            Direction::Up
-        } else {
-            head.direction
+        let dir: Direction = match kb_input.get_pressed().next() {
+            Some(KeyCode::A) => Direction::Left,
+            Some(KeyCode::S) => Direction::Right,
+            Some(KeyCode::W) => Direction::Up,
+            Some(KeyCode::R) => Direction::Down,
+            _ => head.direction,
         };
         // doesn't allow snake to do do 180
         if dir != head.direction.opposite() {
@@ -202,16 +200,33 @@ fn snake_movement_input(kb_input: Res<Input<KeyCode>>, mut head_position: Query<
         }
     }
 }
-// TODO: tails following head
-fn logic_snake_movement(mut heads: Query<(&mut Position, &Snake)>) {
-    if let Some((mut head_pos, snake)) = heads.iter_mut().next() {
+fn logic_snake_movement(
+    mut heads: Query<(Entity, &Snake)>,
+    tails: ResMut<SnakeTailVec>,
+    mut positions: Query<&mut Position>,
+) {
+    // grabbing the head, we only have a single heads so next() gives the one
+    // we want
+    if let Some((head_entity, head)) = heads.iter_mut().next() {
+        // TODO: understand this
+        let tail_positions: Vec<Position> = tails
+            .iter()
+            .map(|e| *positions.get_mut(*e).unwrap()) // query of Position
+            .collect::<Vec<Position>>();
+        let mut head_pos = positions.get_mut(head_entity).unwrap();
         // keep going in previous facing direction
-        match &snake.direction {
+        match &head.direction {
             Direction::Left => head_pos.x -= MOVE_SPEED,
             Direction::Right => head_pos.x += MOVE_SPEED,
             Direction::Up => head_pos.y += MOVE_SPEED,
             Direction::Down => head_pos.y -= MOVE_SPEED,
         }
+        tail_positions
+            .iter()
+            .zip(tails.iter().skip(1))
+            .for_each(|(pos, tails)| {
+                *positions.get_mut(*tails).unwrap() = *pos;
+            })
     }
 }
 /// logic @hitting a wall
@@ -228,7 +243,23 @@ fn logic_hitting_wall_tail(mut heads: Query<(&mut Position, &Snake)>) {
     }
 }
 /// snake consuming a food entity
-fn logic_consume(mut commands: Commands, mut snake: Query<&mut Position, &Snake>) {}
+fn logic_consume(
+    mut commands: Commands,
+    mut growth_writer: EventWriter<GrowthEvent>,
+    head_positions: Query<&Position, With<Snake>>,
+    food_positions: Query<(Entity, &Position), With<Food>>,
+) {
+    for head_pos in head_positions.iter() {
+        for (ent, food_pos) in food_positions.iter() {
+            // when head is on the same tile as food
+            if food_pos == head_pos {
+                // triggers GrowthEvent
+                commands.entity(ent).despawn();
+                growth_writer.send(GrowthEvent);
+            }
+        }
+    }
+}
 // scales everything up/down to viewport
 fn math_size_scale(window: Res<Windows>, mut q: Query<(&Size, &mut Transform)>) {
     let window = window.get_primary().expect("can't get primary window");
