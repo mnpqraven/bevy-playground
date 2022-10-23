@@ -11,13 +11,13 @@ const MAP_WIDTH: i32 = 50;
 const MAP_HEIGHT: i32 = 50;
 const NODE_ENTITY_SCALE: f32 = 0.8;
 const RESOLUTION: (f32, f32) = (500., 500.);
-const TPS: f32 = 60. / 60.;
 const MOVE_SPEED: i32 = 1;
 
 /// snake game following guide from: https://mbuffett.com/posts/bevy-snake-tutorial/
 fn main() {
     // main builder for game logic
     App::new()
+        // RESOURCE ===========================================================
         .insert_resource(WindowDescriptor {
             title: "Othi's snake game".to_string(),
             width: RESOLUTION.0,
@@ -26,16 +26,32 @@ fn main() {
         })
         .insert_resource(ClearColor(Color::rgb(0.04, 0.04, 0.04)))
         .insert_resource(SnakeTailVec::default())
+        .insert_resource(LastTailPosition::default())
+        .insert_resource(LastFacingDirection::default())
+        // PLUGINS ============================================================
         .add_plugins(DefaultPlugins)
+        // STARTUP ============================================================
         .add_startup_system(startup_system)
         .add_startup_system(startup_camera)
         .add_startup_system(spawn_snake)
+        // SYSTEM =============================================================
         .add_system(snake_movement_input.before(logic_snake_movement))
         .add_system_set(
             SystemSet::new()
                 .with_run_criteria(FixedTimestep::step(0.15))
                 .with_system(logic_snake_movement)
-                .with_system(logic_hitting_wall_tail),
+                .with_system(logic_collision_wall.after(logic_snake_movement))
+                .with_system(
+                    logic_collision_tail
+                        .after(logic_snake_movement)
+                        .before(logic_consume),
+                )
+                .with_system(logic_consume.after(logic_snake_movement))
+                .with_system(
+                    logic_snake_growth
+                        .after(logic_snake_movement)
+                        .after(logic_consume),
+                ),
         )
         .add_system_set_to_stage(
             CoreStage::PostUpdate,
@@ -45,11 +61,13 @@ fn main() {
         )
         .add_system_set(
             SystemSet::new()
-                .with_run_criteria(FixedTimestep::step(1.))
+                .with_run_criteria(FixedTimestep::step(1.5))
                 .with_system(spawn_food),
         )
-        .add_system(logic_consume.after(logic_snake_movement))
+        .add_system(game_over.after(logic_snake_movement))
+        // EVENT ==============================================================
         .add_event::<GrowthEvent>()
+        .add_event::<GameOverEvent>()
         .run();
 }
 
@@ -57,29 +75,42 @@ fn main() {
 
 /// RESOURCE
 /// movement direction
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Direction {
     Left,
     Right,
     Up,
     Down,
 }
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::Right
+    }
+}
 impl Direction {
     fn opposite(self) -> Self {
         match self {
-            Direction::Left => Self::Right,
-            Direction::Right => Self::Left,
-            Direction::Up => Self::Down,
-            Direction::Down => Self::Up,
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
         }
     }
 }
 #[derive(Default, Deref, DerefMut)]
 struct SnakeTailVec(Vec<Entity>);
+/// Res, Event
 struct GrowthEvent;
+/// Res
+#[derive(Default)]
+struct LastTailPosition(Option<Position>);
+#[derive(Default)]
+struct LastFacingDirection(Direction);
+/// Res, Event
+struct GameOverEvent;
 
 // COMPONENT ==================================================================
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 struct Position {
     x: i32,
     y: i32,
@@ -97,14 +128,18 @@ impl Size {
         }
     }
 }
-/// The snake
+/// Snake CP
+/// User-controlled component
 #[derive(Component)]
 struct Snake {
     direction: Direction,
 }
+/// SnakeTail CP
+/// Snake body part that can follow the snake head
 #[derive(Component)]
 struct SnakeTail;
-/// food Component
+
+/// Food CP
 /// spawns periodically, on random Position
 /// despawns when Snake lands on the Position
 #[derive(Component)]
@@ -120,7 +155,11 @@ fn startup_camera(mut commands: Commands) {
     commands.spawn_bundle(Camera2dBundle::default());
 }
 
-fn spawn_snake(mut commands: Commands, mut tails: ResMut<SnakeTailVec>) {
+fn spawn_snake(
+    mut commands: Commands,
+    mut tails: ResMut<SnakeTailVec>,
+    mut last_facing_direction: ResMut<LastFacingDirection>,
+) {
     let sprite_snake = SpriteBundle {
         sprite: Sprite {
             color: SNAKE_COLOR,
@@ -132,6 +171,7 @@ fn spawn_snake(mut commands: Commands, mut tails: ResMut<SnakeTailVec>) {
         },
         ..default()
     };
+    *last_facing_direction = LastFacingDirection::default();
     *tails = SnakeTailVec(vec![
         commands
             .spawn_bundle(sprite_snake)
@@ -185,52 +225,70 @@ fn spawn_tail(mut commands: Commands, position: Position) -> Entity {
         .insert(Size::square_scale(0.6))
         .id()
 }
-fn snake_movement_input(kb_input: Res<Input<KeyCode>>, mut head_position: Query<&mut Snake>) {
+fn snake_movement_input(
+    kb_input: Res<Input<KeyCode>>,
+    mut head_position: Query<&mut Snake>,
+    last_facing_direction: Res<LastFacingDirection>,
+) {
     if let Some(mut head) = head_position.iter_mut().next() {
+        fn flush_input(
+            intent_direction: Direction,
+            last_direction: Direction,
+        ) -> Direction {
+            if intent_direction == last_direction.opposite() {
+                intent_direction.opposite()
+            } else {
+                intent_direction
+            }
+        }
         let dir: Direction = match kb_input.get_pressed().next() {
-            Some(KeyCode::A) => Direction::Left,
-            Some(KeyCode::S) => Direction::Right,
-            Some(KeyCode::W) => Direction::Up,
-            Some(KeyCode::R) => Direction::Down,
+            Some(KeyCode::A) => flush_input(Direction::Left, last_facing_direction.0),
+            Some(KeyCode::S) => flush_input(Direction::Right, last_facing_direction.0),
+            Some(KeyCode::W) => flush_input(Direction::Up, last_facing_direction.0),
+            Some(KeyCode::R) => flush_input(Direction::Down, last_facing_direction.0),
             _ => head.direction,
         };
-        // doesn't allow snake to do do 180
-        if dir != head.direction.opposite() {
-            head.direction = dir;
-        }
+        // update head
+        head.direction = dir;
     }
 }
 fn logic_snake_movement(
     mut heads: Query<(Entity, &Snake)>,
     tails: ResMut<SnakeTailVec>,
     mut positions: Query<&mut Position>,
+    mut last_tail_position: ResMut<LastTailPosition>,
+    mut last_facing_direction: ResMut<LastFacingDirection>,
 ) {
     // grabbing the head, we only have a single heads so next() gives the one
     // we want
     if let Some((head_entity, head)) = heads.iter_mut().next() {
-        // TODO: understand this
+        // struct SnakeTailVec(Vec<Entity>)
+        // for all entities in SnakeTailVec, get <Position> then save as new vec
         let tail_positions: Vec<Position> = tails
             .iter()
             .map(|e| *positions.get_mut(*e).unwrap()) // query of Position
             .collect::<Vec<Position>>();
         let mut head_pos = positions.get_mut(head_entity).unwrap();
-        // keep going in previous facing direction
         match &head.direction {
             Direction::Left => head_pos.x -= MOVE_SPEED,
             Direction::Right => head_pos.x += MOVE_SPEED,
             Direction::Up => head_pos.y += MOVE_SPEED,
             Direction::Down => head_pos.y -= MOVE_SPEED,
         }
+        // ???
         tail_positions
             .iter()
             .zip(tails.iter().skip(1))
             .for_each(|(pos, tails)| {
                 *positions.get_mut(*tails).unwrap() = *pos;
-            })
+            });
+        // updates fields
+        last_facing_direction.0 = head.direction;
+        *last_tail_position = LastTailPosition(Some(*tail_positions.last().unwrap()));
     }
 }
 /// logic @hitting a wall
-fn logic_hitting_wall_tail(mut heads: Query<(&mut Position, &Snake)>) {
+fn logic_collision_wall(mut heads: Query<(&mut Position, &Snake)>) {
     if let Some((mut head_pos, snake)) = heads.iter_mut().next() {
         // teleport to other side when touching edge
         match (head_pos.x, head_pos.y, snake.direction) {
@@ -256,6 +314,38 @@ fn logic_consume(
                 // triggers GrowthEvent
                 commands.entity(ent).despawn();
                 growth_writer.send(GrowthEvent);
+            }
+        }
+    }
+}
+fn logic_snake_growth(
+    commands: Commands,
+    last_tail_position: ResMut<LastTailPosition>,
+    mut tails: ResMut<SnakeTailVec>,
+    mut growth_reader: EventReader<GrowthEvent>,
+) {
+    // a GrowthEvent exists
+    if growth_reader.iter().next().is_some() {
+        tails.push(spawn_tail(commands, last_tail_position.0.unwrap()));
+        println!("logic_snake_growth");
+    }
+}
+fn logic_collision_tail(
+    heads: Query<(Entity, &Snake)>,
+    tails: ResMut<SnakeTailVec>,
+    mut positions: Query<&mut Position>,
+    mut game_over_writer: EventWriter<GameOverEvent>,
+) {
+    if let Some((head_entity, _)) = heads.iter().next() {
+        let tail_positions: Vec<Position> = tails
+            .iter()
+            .map(|e| *positions.get_mut(*e).unwrap()) // query of Position
+            .collect::<Vec<Position>>();
+        println!("{:?}", tail_positions);
+        let head_pos = positions.get(head_entity).unwrap();
+        if let Some((_, tail_vec)) = tail_positions.split_first() {
+            if tail_vec.contains(&head_pos) {
+                game_over_writer.send(GameOverEvent);
             }
         }
     }
@@ -288,5 +378,22 @@ fn position_tl(windows: Res<Windows>, mut q: Query<(&Position, &mut Transform)>)
             convert(pos.y as f32, window.height(), MAP_HEIGHT as f32),
             0.0,
         );
+    }
+}
+fn game_over(
+    mut commands: Commands,
+    mut event_reader: EventReader<GameOverEvent>,
+    tails_res: ResMut<SnakeTailVec>,
+    last_facing_direction: ResMut<LastFacingDirection>,
+    food: Query<Entity, With<Food>>,
+    tails: Query<Entity, With<SnakeTail>>,
+) {
+    if event_reader.iter().next().is_some() {
+        println!("GameOverEvent");
+        // clears all food and tails on screen
+        for ent in food.iter().chain(tails.iter()) {
+            commands.entity(ent).despawn();
+        }
+        spawn_snake(commands, tails_res, last_facing_direction);
     }
 }
